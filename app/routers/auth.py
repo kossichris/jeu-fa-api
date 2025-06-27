@@ -444,8 +444,7 @@ async def register(
                 email=user_data.email,
                 hashed_password=hashed_password,
                 is_active=True,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
+                created_at=datetime.utcnow()
             )
             
             db.add(new_user)
@@ -457,8 +456,7 @@ async def register(
                 user_id=new_user.id,
                 pfh=100,  # PFH initial
                 is_active=True,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
+                created_at=datetime.utcnow()
             )
             
             db.add(new_player)
