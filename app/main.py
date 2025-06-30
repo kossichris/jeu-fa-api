@@ -10,8 +10,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import text
 
-from app.routers import game_actions, players, admin, auth, matchmaking, fadu_router
+from app.routers import game_actions, players, admin, auth, matchmaking, fadu_router, websocket
 from app.database import engine, Base
 from app.config import Settings
 settings = Settings()
@@ -46,13 +47,10 @@ class LogRequestsMiddleware(BaseHTTPMiddleware):
 
 def create_tables():
     """Crée les tables de la base de données avec vérification"""
-    Base.metadata.create_all(bind=engine)
     try:
-        if not engine.has_table("players"):  # Vérifie une table clé
-            Base.metadata.create_all(bind=engine)
-            logger.info("Tables créées avec succès")
-        else:
-            logger.info("Tables existantes détectées, skip création")
+        # Create all tables
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tables créées avec succès")
     except Exception as e:
         logger.critical(f"Erreur création tables: {str(e)}", exc_info=True)
         raise
@@ -136,8 +134,8 @@ def get_application() -> FastAPI:
         (players.router, "/players", ["players"]),
         (auth.router, "/auth", ["auth"]),
         (matchmaking.router, "/matchmaking", ["matchmaking"]),
-        (fadu_router.router, "/fadu", ["fadu"])
-
+        (fadu_router.router, "/fadu", ["fadu"]),
+        (websocket.router, "/websocket", ["websocket"])
     ]
     
     for router, prefix, tags in api_routers:

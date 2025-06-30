@@ -32,6 +32,9 @@ ipdb==0.13.13  # Nouveau - debugger amélioré
 mkdocs==1.5.3  # Nouveau - documentation
 mkdocs-material==9.5.3  # Nouveau - thème doc
 
+### WebSocket Testing ###
+websockets==12.0  # Pour les tests WebSocket client
+
 
 
 

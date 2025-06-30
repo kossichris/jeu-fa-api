@@ -137,6 +137,24 @@ class Settings(BaseSettings):
         pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$"
     )
     
+    # Server Configuration
+    SERVER_HOST: str = Field(
+        default="127.0.0.1",
+        env="SERVER_HOST",
+        description="Server host address"
+    )
+    
+    SERVER_PORT: int = Field(
+        default=8000,
+        env="SERVER_PORT",
+        description="Server port"
+    )
+    
+    UVICORN_WORKERS: Optional[int] = Field(
+        default=None,
+        env="UVICORN_WORKERS",
+        description="Number of Uvicorn workers"
+    )
 
     class Config:
         env_file = ".env"

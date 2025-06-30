@@ -94,6 +94,7 @@ from threading import Lock
 from ..database import get_db
 from ..models import DBGame, DBPlayer
 from ..schemas import MatchmakingResponse, MatchmakingRequest
+from ..websocket_service import websocket_game_service
 
 router = APIRouter()
 
@@ -156,6 +157,15 @@ async def join_matchmaking(
                 db.add(new_game)
                 db.commit()
                 
+                # Notifier les joueurs via WebSocket
+                try:
+                    await websocket_game_service.notify_match_found(
+                        opponent_id, user_id, game_id, db
+                    )
+                except Exception as e:
+                    # Log error but don't fail the matchmaking
+                    print(f"WebSocket notification failed: {e}")
+                
                 # Stocker les informations du match pour les deux joueurs
                 match_info_player1 = {
                     "status": "match_found",
@@ -184,6 +194,16 @@ async def join_matchmaking(
             else:
                 # Ajouter à la file d'attente
                 matchmaking_queue.append(user_id)
+                
+                # Notifier le joueur via WebSocket qu'il est en file d'attente
+                try:
+                    await websocket_game_service.notify_matchmaking_status(
+                        user_id, "waiting_for_opponent"
+                    )
+                except Exception as e:
+                    # Log error but don't fail the matchmaking
+                    print(f"WebSocket notification failed: {e}")
+                
                 return MatchmakingResponse(status="waiting_for_opponent")
     
     except Exception as e:
@@ -201,23 +221,27 @@ async def check_matchmaking_status(
     db: Session = Depends(get_db)
 ):
     """
-    Check if a match has been found for a user in queue.
-    Used for polling by the first player waiting.
+    Check if a match has been found for a player in the queue.
+    Returns the match details if found, or waiting status.
     """
     try:
+        # Vérifier si le joueur existe
+        player = db.query(DBPlayer).filter(DBPlayer.id == user_id).first()
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+        
         # Vérifier s'il y a un match en attente
         if user_id in pending_matches:
             match_info = pending_matches.pop(user_id)
             return MatchmakingResponse(**match_info)
         
+        # Vérifier s'il est encore en file d'attente
         with queue_lock:
-            # Vérifier si toujours en file d'attente
             if user_id in matchmaking_queue:
                 return MatchmakingResponse(status="waiting_for_opponent")
         
-        # Pas en file d'attente
         return MatchmakingResponse(status="not_in_queue")
-    
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Status check error: {str(e)}")
 
@@ -231,20 +255,31 @@ async def leave_matchmaking(
     db: Session = Depends(get_db)
 ):
     """
-    Remove user from matchmaking queue.
+    Remove a player from the matchmaking queue.
     """
     try:
+        # Vérifier si le joueur existe
+        player = db.query(DBPlayer).filter(DBPlayer.id == user_id).first()
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+        
         with queue_lock:
             if user_id in matchmaking_queue:
                 matchmaking_queue.remove(user_id)
-                return {"status": "removed_from_queue"}
-            
-        # Nettoyer les matches en attente aussi
-        if user_id in pending_matches:
-            pending_matches.pop(user_id)
-            
-        return {"status": "not_in_queue"}
-    
+                
+                # Notifier le joueur via WebSocket
+                try:
+                    await websocket_game_service.notify_matchmaking_status(
+                        user_id, "left_queue"
+                    )
+                except Exception as e:
+                    # Log error but don't fail the operation
+                    print(f"WebSocket notification failed: {e}")
+                
+                return {"message": "Successfully left matchmaking queue"}
+        
+        return {"message": "Player was not in matchmaking queue"}
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Leave queue error: {str(e)}")
 
@@ -255,11 +290,11 @@ async def leave_matchmaking(
 )
 async def get_queue_info():
     """
-    Get current queue status for debugging/admin purposes.
+    Get information about the current matchmaking queue (admin only).
     """
     with queue_lock:
         return {
             "queue_length": len(matchmaking_queue),
-            "users_in_queue": matchmaking_queue.copy(),
+            "players_in_queue": matchmaking_queue,
             "pending_matches": len(pending_matches)
         }
