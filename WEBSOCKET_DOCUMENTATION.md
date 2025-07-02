@@ -28,100 +28,122 @@ The WebSocket implementation provides real-time communication for:
    - Integrates with existing game logic
    - Handles complex game state updates
 
-## WebSocket Endpoints
+## WebSocket Endpoints (as of latest code)
 
-### 1. Player WebSocket
-**URL:** `ws://localhost:8000/websocket/ws/player/{player_id}`
+### 1. **Player WebSocket**
+- **URL:**  
+  `ws://localhost:8000/api/v1/websocket/websocket/ws/player/{player_id}`
+- **Purpose:** Real-time communication for a specific player.
+- **Parameters:**  
+  - `player_id` (path): The player's database ID (integer).
+- **Flow:**  
+  1. Accepts the connection.
+  2. Validates the player exists in the database.
+  3. Registers the connection with the WebSocket manager.
+  4. Sends a welcome message.
+  5. Handles incoming JSON messages via `handle_player_message`.
+  6. On disconnect or error, unregisters the connection.
 
-**Purpose:** Individual player connections for status updates and actions
+---
 
-**Connection Flow:**
-1. Client connects with player ID
-2. Server validates player exists
-3. Server sends welcome message
-4. Client can send/receive player-specific messages
+### 2. **Game WebSocket**
+- **URL:**  
+  `ws://localhost:8000/api/v1/websocket/websocket/ws/game/{game_id}?player_id={player_id}`
+- **Purpose:** Real-time communication for a specific game session.
+- **Parameters:**  
+  - `game_id` (path): The game ID (integer).
+  - `player_id` (query): The player's ID (integer).
+- **Flow:**  
+  1. Accepts the connection.
+  2. Validates the game and player.
+  3. Registers the connection with the WebSocket manager.
+  4. Sends the current game state.
+  5. Handles incoming JSON messages via `handle_game_message`.
+  6. On disconnect or error, unregisters the connection.
 
-**Message Types:**
-- `player_connect` - Welcome message
-- `ping`/`pong` - Connection health check
-- `player_action` - Player actions
-- `error` - Error messages
+---
 
-### 2. Game WebSocket
-**URL:** `ws://localhost:8000/websocket/ws/game/{game_id}?player_id={player_id}`
+### 3. **Matchmaking WebSocket**
+- **URL:**  
+  `ws://localhost:8000/api/v1/websocket/websocket/ws/matchmaking`
+- **Purpose:** Real-time matchmaking queue management.
+- **Flow:**  
+  1. Accepts the connection.
+  2. Registers the connection with the WebSocket manager.
+  3. Sends a welcome message.
+  4. Handles incoming JSON messages via `handle_matchmaking_message`.
+  5. On disconnect or error, unregisters the connection.
 
-**Purpose:** Real-time game communication for active games
+---
 
-**Connection Flow:**
-1. Client connects with game ID and player ID
-2. Server validates game and player participation
-3. Server sends current game state
-4. Client can send/receive game-specific messages
+### 4. **Test WebSocket (Echo)**
+- **URL:**  
+  `ws://localhost:8000/api/v1/websocket/websocket/ws/test`
+- **Purpose:** Simple echo endpoint for connectivity testing.
+- **Flow:**  
+  1. Accepts the connection.
+  2. Echoes back any received message as plain text.
 
-**Message Types:**
-- `game_state_update` - Game state changes
-- `turn_start` - New turn begins
-- `turn_action` - Player turn submissions
-- `turn_result` - Turn results and calculations
-- `game_end` - Game completion
-- `player_action` - Player actions during game
-- `ping`/`pong` - Connection health check
+---
 
-### 3. Matchmaking WebSocket
-**URL:** `ws://localhost:8000/websocket/ws/matchmaking`
+## Message Handling Functions
 
-**Purpose:** Real-time matchmaking queue management
+- **`handle_player_message(websocket, player_id, message, db)`**  
+  Handles messages for the player WebSocket.  
+  Recognized message types:  
+  - `ping`: Responds with a `pong` message.  
+  - `player_action`: Handles player actions (e.g., strategy submission).  
+  - Unknown types: Responds with an error message.
 
-**Connection Flow:**
-1. Client connects to matchmaking
-2. Server sends welcome message
-3. Client can join/leave queue
-4. Server notifies when matches are found
+- **`handle_game_message(websocket, game_id, player_id, message, db)`**  
+  Handles messages for the game WebSocket.  
+  Recognized message types:  
+  - `ping`: Responds with a `pong` message.  
+  - `turn_action`: Handles turn action submissions.  
+  - Unknown types: Responds with an error message.
 
-**Message Types:**
-- `matchmaking_status` - Queue status updates
-- `match_found` - Opponent found notification
-- `join_queue` - Join matchmaking queue
-- `ping`/`pong` - Connection health check
+- **`handle_matchmaking_message(websocket, message)`**  
+  Handles messages for the matchmaking WebSocket.  
+  Recognized message types:  
+  - `ping`: Responds with a `pong` message.  
+  - `join_queue`: Handles joining the matchmaking queue.  
+  - Unknown types: Responds with an error message.
+
+- **`process_player_action(player_id, game_id, action, db)`**  
+  Processes a player action and notifies other players in the game.
+
+- **`process_turn_action(game_id, player_id, strategy, sacrifice, db)`**  
+  Processes a turn action submission and notifies other players in the game.
+
+---
 
 ## Message Format
 
-All WebSocket messages follow this JSON format:
-
+All WebSocket messages (except the test echo) are expected to be JSON objects with the following structure:
 ```json
 {
   "type": "message_type",
-  "data": {
-    // Message-specific data
-  },
+  "data": { ... },
   "timestamp": "2024-01-01T12:00:00.000Z"
 }
 ```
 
-### Message Types
+---
 
-#### Player Messages
-- `player_connect` - Player successfully connected
-- `player_disconnect` - Player disconnected
-- `player_action` - Player performed an action
+## Example URLs
 
-#### Game Messages
-- `game_state_update` - Game state changed
-- `turn_start` - New turn started
-- `turn_action` - Player submitted turn action
-- `turn_result` - Turn results calculated
-- `game_end` - Game completed
+- Player:      `ws://localhost:8000/api/v1/websocket/websocket/ws/player/1`
+- Game:        `ws://localhost:8000/api/v1/websocket/websocket/ws/game/1?player_id=1`
+- Matchmaking: `ws://localhost:8000/api/v1/websocket/websocket/ws/matchmaking`
+- Test:        `ws://localhost:8000/api/v1/websocket/websocket/ws/test`
 
-#### Matchmaking Messages
-- `matchmaking_join` - Joined matchmaking queue
-- `matchmaking_leave` - Left matchmaking queue
-- `match_found` - Opponent found
-- `matchmaking_status` - Queue status update
+---
 
-#### System Messages
-- `error` - Error occurred
-- `ping` - Health check request
-- `pong` - Health check response
+**Notes:**
+- All endpoints require the correct path and parameters as described above.
+- The test endpoint is for connectivity/debugging only and does not require JSON messages.
+- Player and game endpoints require valid IDs that exist in the database.
+- The backend uses a WebSocket manager to track and route messages for all connections.
 
 ## Integration with Existing Game Logic
 
