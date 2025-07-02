@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class FaGameWebSocketClient:
-    def __init__(self, base_url: str = "ws://localhost:8000"):
+    def __init__(self, base_url: str = "ws://localhost:8000/api/v1"):
         self.base_url = base_url
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
         self.player_id: Optional[int] = None
