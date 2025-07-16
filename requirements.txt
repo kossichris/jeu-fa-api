@@ -12,6 +12,7 @@ asyncpg==0.29.0  # Optionnel pour async
 pydantic==2.7.0
 pydantic-settings==2.2.1
 email-validator==2.1.1  # Nouveau - validation d'emails
+python-multipart==0.0.20  # Required for form data
 
 ### Environment ###
 python-dotenv==1.0.1

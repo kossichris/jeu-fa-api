@@ -19,7 +19,7 @@ router = APIRouter()
 
 # Explanation of the player_websocket function:
 
-@router.websocket("/websocket/ws/player/{player_id}")
+@router.websocket("/ws/player/{player_id}")
 async def player_websocket(
     websocket: WebSocket,
     player_id: int,
@@ -401,4 +401,210 @@ async def process_turn_action(game_id: int, player_id: int, strategy: str,
 @router.get("/websocket/ws/connections")
 async def get_connection_info():
     """Get information about current WebSocket connections"""
-    return websocket_manager.get_connection_info() 
+    return websocket_manager.get_connection_info()
+
+@router.websocket("/ws/online-players")
+async def online_players_websocket(websocket: WebSocket):
+    """WebSocket endpoint for monitoring online players"""
+    try:
+        await websocket.accept()
+        
+        # Connect to WebSocket manager
+        await websocket_manager.connect(websocket, ConnectionType.MATCHMAKING)
+        
+        # Send initial online players list
+        online_players = await get_online_players_list()
+        welcome_msg = create_ws_message(
+            WSMessageType.ONLINE_PLAYERS_UPDATE,
+            {
+                "online_players": online_players,
+                "total_count": len(online_players),
+                "message": "Connected to online players monitor"
+            }
+        )
+        await websocket_manager.send_personal_message(websocket, welcome_msg)
+        
+        # Handle incoming messages
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                
+                # Handle online players monitoring messages
+                await handle_online_players_message(websocket, message)
+                
+            except WebSocketDisconnect:
+                break
+            except json.JSONDecodeError:
+                error_msg = create_ws_message(
+                    WSMessageType.ERROR,
+                    {"message": "Invalid JSON format"}
+                )
+                await websocket_manager.send_personal_message(websocket, error_msg)
+            except Exception as e:
+                logger.error(f"Error handling online players message: {e}")
+                error_msg = create_ws_message(
+                    WSMessageType.ERROR,
+                    {"message": "Internal server error"}
+                )
+                await websocket_manager.send_personal_message(websocket, error_msg)
+    
+    except Exception as e:
+        logger.error(f"Online players WebSocket error: {e}")
+    finally:
+        await websocket_manager.disconnect(websocket)
+
+async def handle_online_players_message(websocket: WebSocket, message: Dict[str, Any]):
+    """Handle incoming messages from online players monitoring WebSocket"""
+    message_type = message.get("type")
+    data = message.get("data", {})
+    
+    if message_type == "ping":
+        # Respond to ping
+        pong_msg = create_ws_message(WSMessageType.PONG, {"online_players_monitor": True})
+        await websocket_manager.send_personal_message(websocket, pong_msg)
+    
+    elif message_type == "refresh_online_players":
+        # Send updated online players list
+        online_players = await get_online_players_list()
+        update_msg = create_ws_message(
+            WSMessageType.ONLINE_PLAYERS_UPDATE,
+            {
+                "online_players": online_players,
+                "total_count": len(online_players),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        await websocket_manager.send_personal_message(websocket, update_msg)
+    
+    else:
+        # Unknown message type
+        error_msg = create_ws_message(
+            WSMessageType.ERROR,
+            {"message": f"Unknown message type: {message_type}"}
+        )
+        await websocket_manager.send_personal_message(websocket, error_msg)
+
+async def get_online_players_list():
+    """Get list of currently online players"""
+    try:
+        # Get online players from WebSocket manager
+        online_players = []
+        
+        # Get connected players from the websocket manager
+        for player_id, websocket in websocket_manager.player_connections.items():
+            # Get player metadata
+            metadata = websocket_manager.connection_metadata.get(websocket, {})
+            player_name = metadata.get("player_name", f"Player {player_id}")
+            connected_at = metadata.get("connected_at")
+            
+            online_players.append({
+                "player_id": player_id,
+                "player_name": player_name,
+                "connected_at": connected_at.isoformat() if connected_at else None,
+                "connection_type": "player"
+            })
+        
+        # Sort by connection time (most recent first)
+        online_players.sort(key=lambda x: x["connected_at"] or "", reverse=True)
+        
+        return online_players
+        
+    except Exception as e:
+        logger.error(f"Error getting online players list: {e}")
+        return []
+
+@router.get("/ws/online-players")
+async def get_online_players_endpoint():
+    """Get list of currently online players via HTTP"""
+    online_players = await get_online_players_list()
+    return {
+        "online_players": online_players,
+        "total_count": len(online_players),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+async def get_comprehensive_online_users():
+    """Get comprehensive list of online users including authenticated users and WebSocket connections"""
+    try:
+        online_users = []
+        
+        # 1. Get WebSocket connected players
+        for player_id, websocket in websocket_manager.player_connections.items():
+            metadata = websocket_manager.connection_metadata.get(websocket, {})
+            player_name = metadata.get("player_name", f"Player {player_id}")
+            connected_at = metadata.get("connected_at")
+            
+            online_users.append({
+                "user_id": player_id,
+                "user_name": player_name,
+                "email": "N/A",  # We'll try to get this from DB
+                "connection_type": "websocket",
+                "connected_at": connected_at.isoformat() if connected_at else None,
+                "status": "websocket_connected"
+            })
+        
+        # 2. Get authenticated users (you'll need to implement session tracking)
+        # This is a placeholder - you'd need to implement proper session management
+        
+        # 3. Get recent database activity (users who logged in recently)
+        try:
+            from ..database import get_db
+            db = next(get_db())
+            
+            # Get recent players from database (this is a basic example)
+            recent_players = db.query(DBPlayer).filter(
+                DBPlayer.last_played.isnot(None)
+            ).order_by(DBPlayer.last_played.desc()).limit(10).all()
+            
+            for player in recent_players:
+                # Check if already in WebSocket connections
+                if not any(user["user_id"] == player.id for user in online_users):
+                    online_users.append({
+                        "user_id": player.id,
+                        "user_name": player.name,
+                        "email": "N/A",  # Add email field to DBPlayer if needed
+                        "connection_type": "database",
+                        "connected_at": player.last_played.isoformat() if player.last_played else None,
+                        "status": "recently_active"
+                    })
+            
+        except Exception as e:
+            logger.error(f"Error getting database users: {e}")
+        
+        # Sort by connection time (most recent first)
+        online_users.sort(key=lambda x: x["connected_at"] or "", reverse=True)
+        
+        return online_users
+        
+    except Exception as e:
+        logger.error(f"Error getting comprehensive online users: {e}")
+        return []
+
+@router.get("/websocket/ws/comprehensive-online-users")
+async def get_comprehensive_online_users_endpoint():
+    """Get comprehensive list of online users including authenticated and WebSocket connected users"""
+    online_users = await get_comprehensive_online_users()
+    return {
+        "online_users": online_users,
+        "total_count": len(online_users),
+        "websocket_connections": len(websocket_manager.player_connections),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@router.get("/websocket/ws/debug-connections")
+async def debug_websocket_connections():
+    """Debug endpoint to see all current WebSocket connections"""
+    return {
+        "player_connections": list(websocket_manager.player_connections.keys()),
+        "game_connections": {game_id: len(connections) for game_id, connections in websocket_manager.game_connections.items()},
+        "matchmaking_connections": len(websocket_manager.matchmaking_connections),
+        "connection_metadata": {
+            str(id(ws)): {
+                "type": metadata.get("type"),
+                "identifier": metadata.get("identifier"),
+                "connected_at": metadata.get("connected_at").isoformat() if metadata.get("connected_at") else None
+            }
+            for ws, metadata in websocket_manager.connection_metadata.items()
+        }
+    }

@@ -29,7 +29,8 @@ class WebSocketManager:
     async def connect(self, websocket: WebSocket, connection_type: ConnectionType, 
                      identifier: Optional[int] = None, metadata: Optional[Dict] = None):
         """Connect a WebSocket with specified type and identifier"""
-        await websocket.accept()
+        # Remove the accept call since connections are already accepted in the route handlers
+        # await websocket.accept()
         
         async with self.lock:
             if connection_type == ConnectionType.PLAYER and identifier:
@@ -127,6 +128,27 @@ class WebSocketManager:
             await self.disconnect(websocket)
             return False
     
+    async def broadcast_online_players_update(self):
+        """Broadcast online players update to all monitoring connections"""
+        from .routers.websocket import get_online_players_list
+        
+        try:
+            online_players = await get_online_players_list()
+            update_msg = create_ws_message(
+                WSMessageType.ONLINE_PLAYERS_UPDATE,
+                {
+                    "online_players": online_players,
+                    "total_count": len(online_players),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+            
+            # Send to all matchmaking connections (which includes online players monitoring)
+            await self.send_to_matchmaking(update_msg)
+            
+        except Exception as e:
+            logger.error(f"Error broadcasting online players update: {e}")
+
     def get_connection_info(self) -> Dict[str, Any]:
         """Get information about current connections (for debugging)"""
         return {
@@ -160,6 +182,7 @@ class WSMessageType(str, Enum):
     PLAYER_CONNECT = "player_connect"
     PLAYER_DISCONNECT = "player_disconnect"
     PLAYER_ACTION = "player_action"
+    ONLINE_PLAYERS_UPDATE = "online_players_update"
     
     # System messages
     ERROR = "error"
@@ -173,4 +196,4 @@ def create_ws_message(message_type: WSMessageType, data: Dict[str, Any],
         "type": message_type,
         "data": data,
         "timestamp": (timestamp or datetime.utcnow()).isoformat()
-    } 
+    }
