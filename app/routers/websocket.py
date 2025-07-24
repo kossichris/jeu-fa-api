@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import Optional, Dict, Any, Tuple
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from datetime import datetime
 from collections import deque
@@ -223,14 +223,38 @@ async def game_websocket(
 #    - If any other exception occurs, an internal server error message is sent and the error is logged.
 # 5. When the connection is closed or an error occurs, the server ensures the client is disconnected from the websocket_manager.
 
-@router.websocket("/websocket/ws/matchmaking")
-async def matchmaking_websocket(websocket: WebSocket, player_id: int = None):
+@router.websocket("/ws/matchmaking")
+async def matchmaking_websocket(websocket: WebSocket, player_id: Optional[int] = Query(None)):
     """WebSocket endpoint for matchmaking"""
     try:
         await websocket.accept()
         
         # Connect to WebSocket manager
         await websocket_manager.connect(websocket, ConnectionType.MATCHMAKING)
+        
+        # Validate player_id if provided
+        if player_id is not None:
+            try:
+                # Check if player exists in database
+                db = next(get_db())
+                player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                if not player:
+                    error_msg = create_ws_message(
+                        WSMessageType.ERROR,
+                        {"message": f"Player with ID {player_id} not found in database"}
+                    )
+                    await websocket_manager.send_personal_message(websocket, error_msg)
+                    await websocket_manager.disconnect(websocket)
+                    return
+            except Exception as e:
+                logger.error(f"Database error validating player {player_id}: {e}")
+                error_msg = create_ws_message(
+                    WSMessageType.ERROR,
+                    {"message": "Database error while validating player"}
+                )
+                await websocket_manager.send_personal_message(websocket, error_msg)
+                await websocket_manager.disconnect(websocket)
+                return
         
         # Check if player is already in matchmaking queue from previous session
         is_already_in_queue = player_id and player_id in players_in_queue

@@ -20,10 +20,10 @@ class FaGameWebSocketClient:
     def __init__(self, base_url: str = "ws://localhost:8000/api/v1"):
         self.base_url = base_url
         self.websocket: Optional[websockets.WebSocketServerProtocol] = None
-        self.player_id: Optional[int] = None
-        self.game_id: Optional[int] = None
+        self.player_id: Optional[str] = None
+        self.game_id: Optional[str] = None
         
-    async def connect_player(self, player_id: int):
+    async def connect_player(self, player_id: str):
         """Connect to player WebSocket endpoint"""
         try:
             url = f"{self.base_url}/websocket/ws/player/{player_id}"
@@ -38,7 +38,7 @@ class FaGameWebSocketClient:
         except Exception as e:
             logger.error(f"Error connecting to player WebSocket: {e}")
     
-    async def connect_game(self, game_id: int, player_id: int):
+    async def connect_game(self, game_id: int, player_id: str):
         """Connect to game WebSocket endpoint"""
         try:
             url = f"{self.base_url}/websocket/ws/game/{game_id}?player_id={player_id}"
@@ -162,7 +162,7 @@ class FaGameWebSocketClient:
             data["game_id"] = game_id
         await self.send_message("player_action", data)
     
-    async def join_matchmaking_queue(self, player_id: int):
+    async def join_matchmaking_queue(self, player_id: str):
         """Join the matchmaking queue"""
         await self.send_message("join_queue", {"player_id": player_id})
     
@@ -178,7 +178,7 @@ async def demo_player_connection():
     
     try:
         # Connect to player WebSocket
-        await client.connect_player(player_id=1)
+        await client.connect_player(int(player_id) =1)
         
         # Send a ping
         await client.send_ping()
