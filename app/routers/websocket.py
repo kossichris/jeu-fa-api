@@ -444,7 +444,6 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
         players_in_queue.add(player_id)
         matchmaking_queue.append((player_id, websocket, joined_at))
         queue_metadata[player_id] = {
-            "websocket": websocket,
             "joined_at": joined_at,
             "player_name": player.name
         }
@@ -467,6 +466,63 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
         
         # Try to find a match
         await try_match_players()
+
+    elif message_type == "get_opponent_players":
+        # Handle request for opponent players (queue and connected users)
+        try:
+            db = next(get_db())
+            # Get queue users with full info
+            queue_users = []
+            for i, (player_id, ws, joined_at) in enumerate(matchmaking_queue):
+                player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                if player:
+                    waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
+                    queue_users.append({
+                        "player_id": player.id,
+                        "name": player.name,
+                        "position": i + 1,
+                        "waiting_time_seconds": int(waiting_time),
+                        "waiting_time_formatted": f"{int(waiting_time // 60)}m {int(waiting_time % 60)}s",
+                        "status": "in_queue"
+                    })
+            # Get connected users (excluding those in queue)
+            connected_users = []
+            for player_id, ws_list in websocket_manager.player_connections.items():
+                if player_id not in players_in_queue:
+                    player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                    if player:
+                        connected_users.append({
+                            "player_id": player.id,
+                            "name": player.name,
+                            "connection_count": len(ws_list),
+                            "status": "connected"
+                        })
+            # Send response
+            response_msg = create_ws_message(
+                WSMessageType.MATCHMAKING_STATUS,
+                {
+                    "type": "opponent_players_response",
+                    "data": {
+                        "queue_users": queue_users,
+                        "connected_users": connected_users,
+                        "summary": {
+                            "total_in_queue": len(queue_users),
+                            "total_connected": len(connected_users),
+                            "total_websocket_connections": len(websocket_manager.player_connections)
+                        },
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                }
+            )
+            await websocket_manager.send_personal_message(websocket, response_msg)
+            db.close()
+        except Exception as e:
+            logger.error(f"Error getting opponent players: {e}")
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Failed to retrieve opponent players"}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
     
     elif message_type == "leave_queue":
         player_id = data.get("player_id")
