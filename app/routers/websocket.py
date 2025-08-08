@@ -59,44 +59,48 @@ async def player_websocket(
         
         # Validate player exists
         db = next(get_db())
-        player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-        if not player:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "data": {"message": "Player not found"},
-                "timestamp": datetime.utcnow().isoformat()
-            }))
-            await websocket.close()
-            return
-        
-        # Connect to WebSocket manager
-        await websocket_manager.connect(
-            websocket, 
-            ConnectionType.PLAYER, 
-            player_id,
-            {"player_name": player.name}
-        )
-        
-        # Send welcome message
-        welcome_msg = create_ws_message(
-            WSMessageType.PLAYER_CONNECT,
-            {
-                "player_id": player_id,
-                "player_name": player.name,
-                "message": "Connected successfully"
-            }
-        )
-        await websocket_manager.send_personal_message(websocket, welcome_msg)
+        try:
+            player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+            if not player:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "data": {"message": "Player not found"},
+                    "timestamp": datetime.utcnow().isoformat()
+                }))
+                await websocket.close()
+                return
+
+            # Connect to WebSocket manager
+            await websocket_manager.connect(
+                websocket, 
+                ConnectionType.PLAYER, 
+                player_id,
+                {"player_name": player.name}
+            )
+
+            # Send welcome message
+            welcome_msg = create_ws_message(
+                WSMessageType.PLAYER_CONNECT,
+                {
+                    "player_id": player_id,
+                    "player_name": player.name,
+                    "message": "Connected successfully"
+                }
+            )
+            await websocket_manager.send_personal_message(websocket, welcome_msg)
+        finally:
+            db.close()
         
         # Handle incoming messages
         while True:
             try:
                 data = await websocket.receive_text()
                 message = json.loads(data)
-                
-                # Handle different message types
-                await handle_player_message(websocket, player_id, message, db)
-                
+
+                # Ouvre une session DB pour chaque message
+                with next(get_db()) as db_msg:
+                    await handle_player_message(websocket, player_id, message, db_msg)
+
             except WebSocketDisconnect:
                 break
             except json.JSONDecodeError:
@@ -112,7 +116,7 @@ async def player_websocket(
                     {"message": "Internal server error"}
                 )
                 await websocket_manager.send_personal_message(websocket, error_msg)
-    
+    # db.close() should not be here; already handled in the inner finally block
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
@@ -136,49 +140,52 @@ async def game_websocket(
         
         # Validate game and player
         db = next(get_db())
-        game = db.query(DBGame).filter(DBGame.id == game_id).first()
-        if not game:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "data": {"message": "Game not found"},
-                "timestamp": datetime.utcnow().isoformat()
-            }))
-            await websocket.close()
-            return
-        
-        # Check if player is part of this game
-        if game.player1_id != player_id and game.player2_id != player_id:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "data": {"message": "Player not part of this game"},
-                "timestamp": datetime.utcnow().isoformat()
-            }))
-            await websocket.close()
-            return
-        
-        # Connect to WebSocket manager
-        await websocket_manager.connect(
-            websocket,
-            ConnectionType.GAME,
-            game_id,
-            {"player_id": player_id, "game_id": game_id}
-        )
-        
-        # Send game state
-        game_state = {
-            "game_id": game_id,
-            "current_turn": game.current_turn,
-            "player1_pfh": game.player1_pfh,
-            "player2_pfh": game.player2_pfh,
-            "is_completed": game.is_completed,
-            "winner_id": game.winner_id
-        }
-        
-        game_msg = create_ws_message(
-            WSMessageType.GAME_STATE_UPDATE,
-            game_state
-        )
-        await websocket_manager.send_personal_message(websocket, game_msg)
+        try:
+            game = db.query(DBGame).filter(DBGame.id == game_id).first()
+            if not game:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "data": {"message": "Game not found"},
+                    "timestamp": datetime.utcnow().isoformat()
+                }))
+                await websocket.close()
+                return
+
+            # Check if player is part of this game
+            if game.player1_id != player_id and game.player2_id != player_id:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "data": {"message": "Player not part of this game"},
+                    "timestamp": datetime.utcnow().isoformat()
+                }))
+                await websocket.close()
+                return
+
+            # Connect to WebSocket manager
+            await websocket_manager.connect(
+                websocket,
+                ConnectionType.GAME,
+                game_id,
+                {"player_id": player_id, "game_id": game_id}
+            )
+
+            # Send game state
+            game_state = {
+                "game_id": game_id,
+                "current_turn": game.current_turn,
+                "player1_pfh": game.player1_pfh,
+                "player2_pfh": game.player2_pfh,
+                "is_completed": game.is_completed,
+                "winner_id": game.winner_id
+            }
+
+            game_msg = create_ws_message(
+                WSMessageType.GAME_STATE_UPDATE,
+                game_state
+            )
+            await websocket_manager.send_personal_message(websocket, game_msg)
+        finally:
+            db.close()
         
         # Handle incoming messages
         while True:
@@ -204,7 +211,7 @@ async def game_websocket(
                     {"message": "Internal server error"}
                 )
                 await websocket_manager.send_personal_message(websocket, error_msg)
-    
+    # db.close() should not be here; already handled in the inner finally block
     except Exception as e:
         logger.error(f"Game WebSocket error: {e}")
     finally:
@@ -237,15 +244,18 @@ async def matchmaking_websocket(websocket: WebSocket, player_id: Optional[int] =
             try:
                 # Check if player exists in database
                 db = next(get_db())
-                player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-                if not player:
-                    error_msg = create_ws_message(
-                        WSMessageType.ERROR,
-                        {"message": f"Player with ID {player_id} not found in database"}
-                    )
-                    await websocket_manager.send_personal_message(websocket, error_msg)
-                    await websocket_manager.disconnect(websocket)
-                    return
+                try:
+                    player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                    if not player:
+                        error_msg = create_ws_message(
+                            WSMessageType.ERROR,
+                            {"message": f"Player with ID {player_id} not found in database"}
+                        )
+                        await websocket_manager.send_personal_message(websocket, error_msg)
+                        await websocket_manager.disconnect(websocket)
+                        return
+                finally:
+                    db.close()
             except Exception as e:
                 logger.error(f"Database error validating player {player_id}: {e}")
                 error_msg = create_ws_message(
@@ -297,7 +307,7 @@ async def matchmaking_websocket(websocket: WebSocket, player_id: Optional[int] =
                     {"message": "Internal server error"}
                 )
                 await websocket_manager.send_personal_message(websocket, error_msg)
-    
+    # db.close() should not be here; already handled in the inner finally block
     except Exception as e:
         logger.error(f"Matchmaking WebSocket error: {e}")
     finally:
@@ -419,6 +429,7 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
                 )
                 await websocket_manager.send_personal_message(websocket, error_msg)
                 return
+            db.close()
         except Exception as e:
             logger.error(f"Database error when joining queue: {e}")
             error_msg = create_ws_message(
@@ -433,7 +444,6 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
         players_in_queue.add(player_id)
         matchmaking_queue.append((player_id, websocket, joined_at))
         queue_metadata[player_id] = {
-            "websocket": websocket,
             "joined_at": joined_at,
             "player_name": player.name
         }
@@ -456,6 +466,63 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
         
         # Try to find a match
         await try_match_players()
+
+    elif message_type == "get_opponent_players":
+        # Handle request for opponent players (queue and connected users)
+        try:
+            db = next(get_db())
+            # Get queue users with full info
+            queue_users = []
+            for i, (player_id, ws, joined_at) in enumerate(matchmaking_queue):
+                player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                if player:
+                    waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
+                    queue_users.append({
+                        "player_id": player.id,
+                        "name": player.name,
+                        "position": i + 1,
+                        "waiting_time_seconds": int(waiting_time),
+                        "waiting_time_formatted": f"{int(waiting_time // 60)}m {int(waiting_time % 60)}s",
+                        "status": "in_queue"
+                    })
+            # Get connected users (excluding those in queue)
+            connected_users = []
+            for player_id, ws_list in websocket_manager.player_connections.items():
+                if player_id not in players_in_queue:
+                    player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
+                    if player:
+                        connected_users.append({
+                            "player_id": player.id,
+                            "name": player.name,
+                            "connection_count": len(ws_list),
+                            "status": "connected"
+                        })
+            # Send response
+            response_msg = create_ws_message(
+                WSMessageType.MATCHMAKING_STATUS,
+                {
+                    "type": "opponent_players_response",
+                    "data": {
+                        "queue_users": queue_users,
+                        "connected_users": connected_users,
+                        "summary": {
+                            "total_in_queue": len(queue_users),
+                            "total_connected": len(connected_users),
+                            "total_websocket_connections": len(websocket_manager.player_connections)
+                        },
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                }
+            )
+            await websocket_manager.send_personal_message(websocket, response_msg)
+            db.close()
+        except Exception as e:
+            logger.error(f"Error getting opponent players: {e}")
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Failed to retrieve opponent players"}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
     
     elif message_type == "leave_queue":
         player_id = data.get("player_id")
@@ -525,7 +592,7 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
                 }
             )
             await websocket_manager.send_personal_message(websocket, response_msg)
-            
+            db.close()
         except Exception as e:
             logger.error(f"Error getting online players: {e}")
             error_msg = create_ws_message(
@@ -710,7 +777,7 @@ async def create_new_game(player1_id: int, player2_id: int) -> int:
         
         logger.info(f"Created new game {new_game.id} between players {player1_id} and {player2_id}")
         return new_game.id
-        
+        db.close()
     except Exception as e:
         logger.error(f"Error creating new game: {e}")
         raise
@@ -934,7 +1001,7 @@ async def get_comprehensive_online_users():
                         "connected_at": player.last_played.isoformat() if player.last_played else None,
                         "status": "recently_active"
                     })
-            
+            db.close()
         except Exception as e:
             logger.error(f"Error getting database users: {e}")
         
@@ -1022,7 +1089,7 @@ async def debug_matchmaking_queue():
             },
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+        db.close()
     except Exception as e:
         logger.error(f"Error in debug queue endpoint: {e}")
         return {
@@ -1078,7 +1145,8 @@ async def get_queue_users():
                 "last_updated": datetime.utcnow().isoformat()
             }
         }
-        
+
+        db.close()
     except Exception as e:
         logger.error(f"Error retrieving queue users: {e}")
         return {
@@ -1148,7 +1216,7 @@ async def get_connected_users():
                 "last_updated": datetime.utcnow().isoformat()
             }
         }
-        
+        db.close() 
     except Exception as e:
         logger.error(f"Error retrieving connected users: {e}")
         return {
