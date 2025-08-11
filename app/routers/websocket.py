@@ -3,7 +3,7 @@ import logging
 from typing import Optional, Dict, Any, Tuple
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 import asyncio
 
@@ -384,15 +384,87 @@ async def handle_game_message(websocket: WebSocket, game_id: int, player_id: int
         await websocket_manager.send_personal_message(websocket, error_msg)
 
 async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, Any]):
-    """Handle incoming messages from matchmaking WebSocket"""
+    # Refactor to reduce complexity and remove redundant returns
     message_type = message.get("type")
     data = message.get("data", {})
-    
-    if message_type == "ping":
-        # Respond to ping
-        pong_msg = create_ws_message(WSMessageType.PONG, {"matchmaking": True})
-        await websocket_manager.send_personal_message(websocket, pong_msg)
-    
+
+    if message_type == "invite_player":
+        opponent_id = data.get("opponent_id")
+        player_id = data.get("player_id")
+        if not opponent_id or not player_id:
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Missing opponent_id or player_id for invitation"}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
+            return
+
+        opponent_ws = None
+        for pid, ws, _ in matchmaking_queue:
+            if pid == opponent_id:
+                opponent_ws = ws
+                break
+
+        if not opponent_ws:
+            ws_list = websocket_manager.player_connections.get(opponent_id)
+            if ws_list:
+                opponent_ws = ws_list[0]
+
+        if opponent_ws:
+            invite_msg = create_ws_message(
+                WSMessageType.MATCHMAKING_STATUS,
+                {
+                    "type": "invitation_received",
+                    "from_player_id": player_id,
+                    "message": f"You have received a match invitation from player {player_id}"
+                }
+            )
+            await websocket_manager.send_personal_message(opponent_ws, invite_msg)
+        else:
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Opponent not connected"}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
+
+    elif message_type == "accept_invitation":
+        opponent_id = data.get("opponent_id")
+        player_id = data.get("player_id")
+        if not opponent_id or not player_id:
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Missing opponent_id or player_id for accept_invitation"}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
+            return
+
+        try:
+            game_id = await create_new_game(player_id, opponent_id)
+            accepted_msg = create_ws_message(
+                WSMessageType.MATCHMAKING_STATUS,
+                {
+                    "type": "invitation_accepted",
+                    "from_player_id": player_id,
+                    "game_id": game_id,
+                    "message": f"Player {player_id} accepted your invitation. Game {game_id} can start."
+                }
+            )
+            opponent_ws = websocket_manager.player_connections.get(opponent_id, [None])[0]
+            if opponent_ws:
+                await websocket_manager.send_personal_message(opponent_ws, accepted_msg)
+            await websocket_manager.send_personal_message(websocket, accepted_msg)
+
+            await remove_player_from_queue(player_id)
+            await remove_player_from_queue(opponent_id)
+
+        except Exception as e:
+            logger.error(f"Error creating game after invitation acceptance: {e}")
+            error_msg = create_ws_message(
+                WSMessageType.ERROR,
+                {"message": "Failed to create game after invitation acceptance."}
+            )
+            await websocket_manager.send_personal_message(websocket, error_msg)
+
     elif message_type == "join_queue":
         player_id = data.get("player_id")
         if not player_id:
@@ -440,7 +512,7 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
             return
         
         # Add to queue
-        joined_at = datetime.utcnow()
+        joined_at = datetime.now(timezone.utc)
         players_in_queue.add(player_id)
         matchmaking_queue.append((player_id, websocket, joined_at))
         queue_metadata[player_id] = {
@@ -476,7 +548,7 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
             for i, (player_id, ws, joined_at) in enumerate(matchmaking_queue):
                 player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
                 if player:
-                    waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
+                    waiting_time = (datetime.now(timezone.utc) - joined_at).total_seconds() if joined_at else 0
                     queue_users.append({
                         "player_id": player.id,
                         "name": player.name,
@@ -551,7 +623,7 @@ async def handle_matchmaking_message(websocket: WebSocket, message: Dict[str, An
             for i, (player_id, ws, joined_at) in enumerate(matchmaking_queue):
                 player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
                 if player:
-                    waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
+                    waiting_time = (datetime.now(timezone.utc) - joined_at).total_seconds() if joined_at else 0
                     queue_users.append({
                         "player_id": player.id,
                         "name": player.name,
@@ -673,565 +745,36 @@ async def process_turn_action(game_id: int, player_id: int, strategy: str,
     await websocket_manager.send_to_game(game_id, turn_msg)
 
 async def try_match_players():
-    """Try to match players in the queue - automatically called when players join"""
+    """Try to match players in the queue - notify players for invitation"""
     if len(matchmaking_queue) >= 2:
         # Get two players from the queue
         player1_id, player1_ws, joined_at1 = matchmaking_queue.popleft()
         player2_id, player2_ws, joined_at2 = matchmaking_queue.popleft()
-        
-        # Remove from tracking structures
-        players_in_queue.discard(player1_id)
-        players_in_queue.discard(player2_id)
-        queue_metadata.pop(player1_id, None)
-        queue_metadata.pop(player2_id, None)
-        
-        try:
-            # Create a new game
-            game_id = await create_new_game(player1_id, player2_id)
-            
-            # Get player names
-            player1_name = queue_metadata.get(player1_id, {}).get("player_name", f"Player {player1_id}")
-            player2_name = queue_metadata.get(player2_id, {}).get("player_name", f"Player {player2_id}")
-            
-            # Notify both players
-            match_msg_p1 = create_ws_message(
-                WSMessageType.MATCHMAKING_STATUS,
-                {
-                    "player_id": player1_id,
-                    "opponent_id": player2_id,
-                    "opponent_name": player2_name,
-                    "game_id": game_id,
-                    "status": "match_found",
-                    "in_queue": False,
-                    "message": f"Match found! Playing against {player2_name}"
-                }
-            )
-            
-            match_msg_p2 = create_ws_message(
-                WSMessageType.MATCHMAKING_STATUS,
-                {
-                    "player_id": player2_id,
-                    "opponent_id": player1_id,
-                    "opponent_name": player1_name,
-                    "game_id": game_id,
-                    "status": "match_found",
-                    "in_queue": False,
-                    "message": f"Match found! Playing against {player1_name}"
-                }
-            )
-            
-            await websocket_manager.send_personal_message(player1_ws, match_msg_p1)
-            await websocket_manager.send_personal_message(player2_ws, match_msg_p2)
-            
-            logger.info(f"Matched players {player1_id} and {player2_id} in game {game_id}")
-            
-        except Exception as e:
-            logger.error(f"Error creating match: {e}")
-            # Put players back in queue on error
-            matchmaking_queue.appendleft((player1_id, player1_ws, joined_at1))
-            matchmaking_queue.appendleft((player2_id, player2_ws, joined_at2))
-            players_in_queue.add(player1_id)
-            players_in_queue.add(player2_id)
-            
-            # Restore metadata
-            if player1_id not in queue_metadata:
-                queue_metadata[player1_id] = {
-                    "websocket": player1_ws,
-                    "joined_at": joined_at1,
-                    "player_name": player1_name
-                }
-            if player2_id not in queue_metadata:
-                queue_metadata[player2_id] = {
-                    "websocket": player2_ws,
-                    "joined_at": joined_at2,
-                    "player_name": player2_name
-                }
-            
-            # Notify players of error
-            error_msg = create_ws_message(
-                WSMessageType.ERROR,
-                {"message": "Failed to create match. You remain in queue."}
-            )
-            await websocket_manager.send_personal_message(player1_ws, error_msg)
-            await websocket_manager.send_personal_message(player2_ws, error_msg)
 
-async def create_new_game(player1_id: int, player2_id: int) -> int:
-    """Create a new game between two players"""
-    try:
-        db = next(get_db())
-        
-        # Create new game record
-        new_game = DBGame(
-            player1_id=player1_id,
-            player2_id=player2_id,
-            current_turn=1,
-            player1_pfh=100,  # Starting health
-            player2_pfh=100,  # Starting health
-            is_completed=False,
-            created_at=datetime.utcnow()
-        )
-        
-        db.add(new_game)
-        db.commit()
-        db.refresh(new_game)
-        
-        logger.info(f"Created new game {new_game.id} between players {player1_id} and {player2_id}")
-        return new_game.id
-        db.close()
-    except Exception as e:
-        logger.error(f"Error creating new game: {e}")
-        raise
-
-async def remove_player_from_queue(player_id: int):
-    """Remove a player from the matchmaking queue"""
-    if player_id in players_in_queue:
-        players_in_queue.discard(player_id)
-        queue_metadata.pop(player_id, None)
-        
-        # Remove from deque (this is inefficient for large queues but works for small ones)
-        new_queue = deque()
-        for pid, ws, joined_at in matchmaking_queue:
-            if pid != player_id:
-                new_queue.append((pid, ws, joined_at))
-        matchmaking_queue.clear()
-        matchmaking_queue.extend(new_queue)
-
-async def cleanup_player_from_queue(websocket: WebSocket, player_id: Optional[int]):
-    """Clean up player from queue when they disconnect"""
-    if player_id and player_id in players_in_queue:
-        await remove_player_from_queue(player_id)
-        logger.info(f"Cleaned up player {player_id} from matchmaking queue on disconnect")
-
-def get_queue_position(player_id: int) -> int:
-    """Get the position of a player in the queue (1-indexed)"""
-    for i, (pid, _, _) in enumerate(matchmaking_queue):
-        if pid == player_id:
-            return i + 1
-    return -1
-
-# Add endpoint to check queue status
-@router.get("/websocket/ws/queue-status")
-async def get_queue_status():
-    """Get current matchmaking queue status"""
-    queue_details = []
-    for player_id, websocket, joined_at in matchmaking_queue:
-        metadata = queue_metadata.get(player_id, {})
-        queue_details.append({
-            "player_id": player_id,
-            "player_name": metadata.get("player_name", f"Player {player_id}"),
-            "joined_at": joined_at.isoformat() if joined_at else None,
-            "waiting_time_seconds": (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
-        })
-    
-    return {
-        "players_in_queue": len(players_in_queue),
-        "queue_size": len(matchmaking_queue),
-        "queue_details": queue_details,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-# HTTP endpoint to get WebSocket connection info (for debugging)
-@router.get("/websocket/ws/connections")
-async def get_connection_info():
-    """Get information about current WebSocket connections"""
-    return websocket_manager.get_connection_info()
-
-@router.websocket("/ws/online-players")
-async def online_players_websocket(websocket: WebSocket):
-    """WebSocket endpoint for monitoring online players"""
-    try:
-        await websocket.accept()
-        
-        # Connect to WebSocket manager
-        await websocket_manager.connect(websocket, ConnectionType.MATCHMAKING)
-        
-        # Send initial online players list
-        online_players = await get_online_players_list()
-        welcome_msg = create_ws_message(
-            WSMessageType.ONLINE_PLAYERS_UPDATE,
+        # Notify player1 to invite player2
+        invite_msg_p1 = create_ws_message(
+            WSMessageType.MATCHMAKING_STATUS,
             {
-                "online_players": online_players,
-                "total_count": len(online_players),
-                "message": "Connected to online players monitor"
+                "type": "match_possible",
+                "player_id": player1_id,
+                "opponent_id": player2_id,
+                "message": f"You can invite Player {player2_id} to start a game."
             }
         )
-        await websocket_manager.send_personal_message(websocket, welcome_msg)
-        
-        # Handle incoming messages
-        while True:
-            try:
-                data = await websocket.receive_text()
-                message = json.loads(data)
-                
-                # Handle online players monitoring messages
-                await handle_online_players_message(websocket, message)
-                
-            except WebSocketDisconnect:
-                break
-            except json.JSONDecodeError:
-                error_msg = create_ws_message(
-                    WSMessageType.ERROR,
-                    {"message": "Invalid JSON format"}
-                )
-                await websocket_manager.send_personal_message(websocket, error_msg)
-            except Exception as e:
-                logger.error(f"Error handling online players message: {e}")
-                error_msg = create_ws_message(
-                    WSMessageType.ERROR,
-                    {"message": "Internal server error"}
-                )
-                await websocket_manager.send_personal_message(websocket, error_msg)
-    
-    except Exception as e:
-        logger.error(f"Online players WebSocket error: {e}")
-    finally:
-        await websocket_manager.disconnect(websocket)
+        await websocket_manager.send_personal_message(player1_ws, invite_msg_p1)
 
-async def handle_online_players_message(websocket: WebSocket, message: Dict[str, Any]):
-    """Handle incoming messages from online players monitoring WebSocket"""
-    message_type = message.get("type")
-    data = message.get("data", {})
-    
-    if message_type == "ping":
-        # Respond to ping
-        pong_msg = create_ws_message(WSMessageType.PONG, {"online_players_monitor": True})
-        await websocket_manager.send_personal_message(websocket, pong_msg)
-    
-    elif message_type == "refresh_online_players":
-        # Send updated online players list
-        online_players = await get_online_players_list()
-        update_msg = create_ws_message(
-            WSMessageType.ONLINE_PLAYERS_UPDATE,
+        # Notify player2 that they are waiting for an invitation
+        waiting_msg_p2 = create_ws_message(
+            WSMessageType.MATCHMAKING_STATUS,
             {
-                "online_players": online_players,
-                "total_count": len(online_players),
-                "timestamp": datetime.utcnow().isoformat()
+                "type": "waiting_for_invitation",
+                "player_id": player2_id,
+                "opponent_id": player1_id,
+                "message": f"Waiting for Player {player1_id} to invite you to a game."
             }
         )
-        await websocket_manager.send_personal_message(websocket, update_msg)
-    
-    else:
-        # Unknown message type
-        error_msg = create_ws_message(
-            WSMessageType.ERROR,
-            {"message": f"Unknown message type: {message_type}"}
-        )
-        await websocket_manager.send_personal_message(websocket, error_msg)
+        await websocket_manager.send_personal_message(player2_ws, waiting_msg_p2)
 
-async def get_online_players_list():
-    """Get list of currently online players"""
-    try:
-        # Get online players from WebSocket manager
-        online_players = []
-        
-        # Get connected players from the websocket manager
-        for player_id, websocket in websocket_manager.player_connections.items():
-            # Get player metadata
-            metadata = websocket_manager.connection_metadata.get(websocket, {})
-            player_name = metadata.get("player_name", f"Player {player_id}")
-            connected_at = metadata.get("connected_at")
-            
-            online_players.append({
-                "player_id": player_id,
-                "player_name": player_name,
-                "connected_at": connected_at.isoformat() if connected_at else None,
-                "connection_type": "player"
-            })
-        
-        # Sort by connection time (most recent first)
-        online_players.sort(key=lambda x: x["connected_at"] or "", reverse=True)
-        
-        return online_players
-        
-    except Exception as e:
-        logger.error(f"Error getting online players list: {e}")
-        return []
-
-@router.get("/ws/online-players")
-async def get_online_players_endpoint():
-    """Get list of currently online players via HTTP"""
-    online_players = await get_online_players_list()
-    return {
-        "online_players": online_players,
-        "total_count": len(online_players),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-async def get_comprehensive_online_users():
-    """Get comprehensive list of online users including authenticated users and WebSocket connections"""
-    try:
-        online_users = []
-        
-        # 1. Get WebSocket connected players
-        for player_id, websocket in websocket_manager.player_connections.items():
-            metadata = websocket_manager.connection_metadata.get(websocket, {})
-            player_name = metadata.get("player_name", f"Player {player_id}")
-            connected_at = metadata.get("connected_at")
-            
-            online_users.append({
-                "user_id": player_id,
-                "user_name": player_name,
-                "email": "N/A",  # We'll try to get this from DB
-                "connection_type": "websocket",
-                "connected_at": connected_at.isoformat() if connected_at else None,
-                "status": "websocket_connected"
-            })
-        
-        # 2. Get authenticated users (you'll need to implement session tracking)
-        # This is a placeholder - you'd need to implement proper session management
-        
-        # 3. Get recent database activity (users who logged in recently)
-        try:
-            from ..database import get_db
-            db = next(get_db())
-            
-            # Get recent players from database (this is a basic example)
-            recent_players = db.query(DBPlayer).filter(
-                DBPlayer.last_played.isnot(None)
-            ).order_by(DBPlayer.last_played.desc()).limit(10).all()
-            
-            for player in recent_players:
-                # Check if already in WebSocket connections
-                if not any(user["user_id"] == player.id for user in online_users):
-                    online_users.append({
-                        "user_id": player.id,
-                        "user_name": player.name,
-                        "email": "N/A",  # Add email field to DBPlayer if needed
-                        "connection_type": "database",
-                        "connected_at": player.last_played.isoformat() if player.last_played else None,
-                        "status": "recently_active"
-                    })
-            db.close()
-        except Exception as e:
-            logger.error(f"Error getting database users: {e}")
-        
-        # Sort by connection time (most recent first)
-        online_users.sort(key=lambda x: x["connected_at"] or "", reverse=True)
-        
-        return online_users
-        
-    except Exception as e:
-        logger.error(f"Error getting comprehensive online users: {e}")
-        return []
-
-@router.get("/websocket/ws/comprehensive-online-users")
-async def get_comprehensive_online_users_endpoint():
-    """Get comprehensive list of online users including authenticated and WebSocket connected users"""
-    online_users = await get_comprehensive_online_users()
-    return {
-        "online_users": online_users,
-        "total_count": len(online_users),
-        "websocket_connections": len(websocket_manager.player_connections),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-@router.get("/websocket/ws/debug-connections")
-async def debug_websocket_connections():
-    """Debug endpoint to see all current WebSocket connections"""
-    return {
-        "player_connections": list(websocket_manager.player_connections.keys()),
-        "game_connections": {game_id: len(connections) for game_id, connections in websocket_manager.game_connections.items()},
-        "matchmaking_connections": len(websocket_manager.matchmaking_connections),
-        "connection_metadata": {
-            str(id(ws)): {
-                "type": metadata.get("type"),
-                "identifier": metadata.get("identifier"),
-                "connected_at": metadata.get("connected_at").isoformat() if metadata.get("connected_at") else None
-            }
-            for ws, metadata in websocket_manager.connection_metadata.items()
-        }
-    }
-
-# Debug endpoints for matchmaking
-@router.get("/websocket/ws/debug-queue")
-async def debug_matchmaking_queue():
-    """Debug endpoint to see detailed queue information with full user data"""
-    try:
-        db = next(get_db())
-        queue_items = []
-        
-        for i, (player_id, websocket, joined_at) in enumerate(matchmaking_queue):
-            metadata = queue_metadata.get(player_id, {})
-            
-            # Get player info from database
-            player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-            player_name = player.name if player else f"Player {player_id}"
-            player_email = player.email if player and hasattr(player, 'email') else None
-            
-            waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
-            
-            queue_items.append({
-                "position": i + 1,
-                "player_id": player_id,
-                "player_name": player_name,
-                "player_email": player_email,
-                "joined_at": joined_at.isoformat() if joined_at else None,
-                "waiting_time_seconds": int(waiting_time),
-                "waiting_time_formatted": f"{int(waiting_time // 60)}m {int(waiting_time % 60)}s",
-                "websocket_id": str(id(websocket)),
-                "metadata": {
-                    "has_metadata": player_id in queue_metadata,
-                    "stored_name": metadata.get("player_name"),
-                    "stored_joined_at": metadata.get("joined_at").isoformat() if metadata.get("joined_at") else None
-                }
-            })
-        
-        return {
-            "total_players_in_queue": len(players_in_queue),
-            "queue_size": len(matchmaking_queue),
-            "players_set": list(players_in_queue),
-            "queue_items": queue_items,
-            "metadata_count": len(queue_metadata),
-            "websocket_connections": {
-                "player_connections": len(websocket_manager.player_connections),
-                "matchmaking_connections": len(websocket_manager.matchmaking_connections),
-                "game_connections": sum(len(conns) for conns in websocket_manager.game_connections.values())
-            },
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        db.close()
-    except Exception as e:
-        logger.error(f"Error in debug queue endpoint: {e}")
-        return {
-            "error": "Failed to retrieve queue information",
-            "total_players_in_queue": len(players_in_queue),
-            "queue_size": len(matchmaking_queue),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-@router.post("/websocket/ws/debug-force-match")
-async def debug_force_match():
-    """Debug endpoint to force a match between queued players"""
-    if len(matchmaking_queue) >= 2:
-        await try_match_players()
-        return {"message": "Forced match attempt completed", "remaining_in_queue": len(matchmaking_queue)}
-    else:
-        return {"message": "Not enough players in queue", "players_in_queue": len(matchmaking_queue)}
-
-@router.get("/ws/queue-users")
-async def get_queue_users():
-    """Get detailed user information for players currently in the matchmaking queue"""
-    try:
-        db = next(get_db())
-        queue_users = []
-        
-        for i, (player_id, websocket, joined_at) in enumerate(matchmaking_queue):
-            # Get player info from database
-            player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-            
-            if player:
-                # Get additional metadata from queue
-                metadata = queue_metadata.get(player_id, {})
-                waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
-                
-                queue_users.append({
-                    "position": i + 1,
-                    "player_id": player.id,
-                    "name": player.name,
-                    "email": player.email if hasattr(player, 'email') else None,
-                    "is_active": player.is_active if hasattr(player, 'is_active') else True,
-                    "joined_at": joined_at.isoformat() if joined_at else None,
-                    "waiting_time_seconds": int(waiting_time),
-                    "waiting_time_formatted": f"{int(waiting_time // 60)}m {int(waiting_time % 60)}s",
-                    "created_at": player.created_at.isoformat() if hasattr(player, 'created_at') and player.created_at else None
-                })
-        
-        return {
-            "success": True,
-            "data": {
-                "total_in_queue": len(queue_users),
-                "users": queue_users,
-                "queue_status": "active" if len(queue_users) > 0 else "empty",
-                "last_updated": datetime.utcnow().isoformat()
-            }
-        }
-
-        db.close()
-    except Exception as e:
-        logger.error(f"Error retrieving queue users: {e}")
-        return {
-            "success": False,
-            "error": "Failed to retrieve queue users",
-            "data": {
-                "total_in_queue": 0,
-                "users": [],
-                "queue_status": "error",
-                "last_updated": datetime.utcnow().isoformat()
-            }
-        }
-
-@router.get("/ws/connected-users")
-async def get_connected_users():
-    """Get all connected users (WebSocket connections + queue users)"""
-    try:
-        db = next(get_db())
-        
-        # Get users in matchmaking queue
-        queue_users = []
-        for i, (player_id, websocket, joined_at) in enumerate(matchmaking_queue):
-            player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-            if player:
-                waiting_time = (datetime.utcnow() - joined_at).total_seconds() if joined_at else 0
-                queue_users.append({
-                    "player_id": player.id,
-                    "name": player.name,
-                    "status": "in_queue",
-                    "queue_position": i + 1,
-                    "waiting_time_seconds": int(waiting_time),
-                    "connected_at": joined_at.isoformat() if joined_at else None
-                })
-        
-        # Get users with general WebSocket connections
-        connected_users = []
-        for player_id, ws_list in websocket_manager.player_connections.items():
-            if player_id not in players_in_queue:  # Don't duplicate queue users
-                player = db.query(DBPlayer).filter(DBPlayer.id == player_id).first()
-                if player:
-                    connected_users.append({
-                        "player_id": player.id,
-                        "name": player.name,
-                        "status": "connected",
-                        "connection_count": len(ws_list)
-                    })
-        
-        # Get users in active games
-        game_users = []
-        for game_id, ws_list in websocket_manager.game_connections.items():
-            # You might want to get player info from the game_id
-            # This depends on your game model structure
-            pass
-        
-        return {
-            "success": True,
-            "data": {
-                "queue_users": queue_users,
-                "connected_users": connected_users,
-                "game_users": game_users,
-                "summary": {
-                    "total_in_queue": len(queue_users),
-                    "total_connected": len(connected_users),
-                    "total_in_games": len(game_users),
-                    "total_websocket_connections": len(websocket_manager.player_connections)
-                },
-                "last_updated": datetime.utcnow().isoformat()
-            }
-        }
-        db.close() 
-    except Exception as e:
-        logger.error(f"Error retrieving connected users: {e}")
-        return {
-            "success": False,
-            "error": "Failed to retrieve connected users",
-            "data": {
-                "queue_users": [],
-                "connected_users": [],
-                "game_users": [],
-                "summary": {
-                    "total_in_queue": 0,
-                    "total_connected": 0,
-                    "total_in_games": 0,
-                    "total_websocket_connections": 0
-                },
-                "last_updated": datetime.utcnow().isoformat()
-            }
-        }
+        # Keep players in queue until invitation is accepted
+        matchmaking_queue.appendleft((player2_id, player2_ws, joined_at2))
+        matchmaking_queue.appendleft((player1_id, player1_ws, joined_at1))
