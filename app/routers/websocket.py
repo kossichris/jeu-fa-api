@@ -132,19 +132,18 @@ async def player_websocket(
 #   - websocket: the WebSocket connection object
 #   - game_id: the ID of the game (from the URL path)
 #   - player_id: the ID of the player (from the query parameter)
-@router.websocket("/websocket/ws/game/{game_id}")
+@router.websocket("/ws/game/{game_id}")
 async def game_websocket(
     websocket: WebSocket,
     game_id: int,
-    player_id: int
+    player_id: int = Query(...)
 ):
     """WebSocket endpoint for game-specific connections"""
     try:
         await websocket.accept()
         
         # Validate game and player
-        db = next(get_db())
-        try:
+        for db in _db_session():
             game = db.query(DBGame).filter(DBGame.id == game_id).first()
             if not game:
                 await websocket.send_text(json.dumps({
@@ -188,33 +187,30 @@ async def game_websocket(
                 game_state
             )
             await websocket_manager.send_personal_message(websocket, game_msg)
-        finally:
-            db.close()
-        
-        # Handle incoming messages
-        while True:
-            try:
-                data = await websocket.receive_text()
-                message = json.loads(data)
-                
-                # Handle game-specific messages
-                await handle_game_message(websocket, game_id, player_id, message, db)
-                
-            except WebSocketDisconnect:
-                break
-            except json.JSONDecodeError:
-                error_msg = create_ws_message(
-                    WSMessageType.ERROR,
-                    {"message": "Invalid JSON format"}
-                )
-                await websocket_manager.send_personal_message(websocket, error_msg)
-            except Exception as e:
-                logger.error(f"Error handling game message: {e}")
-                error_msg = create_ws_message(
-                    WSMessageType.ERROR,
-                    {"message": "Internal server error"}
-                )
-                await websocket_manager.send_personal_message(websocket, error_msg)
+
+            # Handle incoming messages
+            while True:
+                try:
+                    data = await websocket.receive_text()
+                    message = json.loads(data)
+                    # Use a fresh DB session for each message
+                    for db_msg in _db_session():
+                        await handle_game_message(websocket, game_id, player_id, message, db_msg)
+                except WebSocketDisconnect:
+                    break
+                except json.JSONDecodeError:
+                    error_msg = create_ws_message(
+                        WSMessageType.ERROR,
+                        {"message": "Invalid JSON format"}
+                    )
+                    await websocket_manager.send_personal_message(websocket, error_msg)
+                except Exception as e:
+                    logger.error(f"Error handling game message: {e}")
+                    error_msg = create_ws_message(
+                        WSMessageType.ERROR,
+                        {"message": "Internal server error"}
+                    )
+                    await websocket_manager.send_personal_message(websocket, error_msg)
     # db.close() should not be here; already handled in the inner finally block
     except Exception as e:
         logger.error(f"Game WebSocket error: {e}")
