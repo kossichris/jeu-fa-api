@@ -389,6 +389,38 @@ async def handle_game_message(websocket: WebSocket, game_id: int, player_id: int
 
 # ---------- helpers
 
+async def _create_game_internal(player1_id: int, player2_id: int) -> int:
+    """Internal function to create a new game between two players"""
+    try:
+        for db in _db_session():
+            # Verify both players exist
+            player1 = db.query(DBPlayer).filter(DBPlayer.id == player1_id).first()
+            player2 = db.query(DBPlayer).filter(DBPlayer.id == player2_id).first()
+            
+            if not player1 or not player2:
+                raise ValueError(f"One or both players not found: {player1_id}, {player2_id}")
+            
+            # Create new game
+            new_game = DBGame(
+                player1_id=player1_id,
+                player2_id=player2_id,
+                current_turn=player1_id,  # Player 1 starts
+                player1_pfh=30,  # Initial PFH
+                player2_pfh=30,  # Initial PFH
+                is_completed=False
+            )
+            
+            db.add(new_game)
+            db.commit()
+            db.refresh(new_game)
+            
+            logger.info(f"Created new game {new_game.id} between players {player1_id} and {player2_id}")
+            return new_game.id
+            
+    except Exception as e:
+        logger.error(f"Error creating internal game: {e}", exc_info=True)
+        raise
+
 async def _send_error(ws: WebSocket, message: str) -> None:
     await websocket_manager.send_personal_message(
         ws,
@@ -398,14 +430,26 @@ async def _send_error(ws: WebSocket, message: str) -> None:
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
-def _get_opponent_ws(opponent_id: str) -> Optional[WebSocket]:
+def _get_opponent_ws(opponent_id) -> Optional[WebSocket]:
+    """Get opponent WebSocket connection by ID (handles both int and str)"""
+    # Convert to int if it's a string, or use as-is if it's already int
+    try:
+        opponent_id_int = int(opponent_id) if isinstance(opponent_id, str) else opponent_id
+    except (ValueError, TypeError):
+        return None
+        
     # 1) try queue
     for pid, ws, _ in matchmaking_queue:
-        if pid == opponent_id:
+        if pid == opponent_id_int:
             return ws
-    # 2) try active connections
-    ws_list = websocket_manager.player_connections.get(opponent_id)
-    print(f"Active WebSocket connections for {opponent_id}: {ws_list}")
+    
+    # 2) try active connections - the websocket manager might use int or str keys
+    ws_list = websocket_manager.player_connections.get(opponent_id_int)
+    if not ws_list:
+        # Try with string key
+        ws_list = websocket_manager.player_connections.get(str(opponent_id_int))
+    
+    print(f"Active WebSocket connections for {opponent_id_int}: {ws_list}")
     if ws_list and isinstance(ws_list, list) and len(ws_list) > 0:
         return ws_list[0]
     return None
@@ -426,6 +470,13 @@ def _format_waiting(joined_at: Optional[datetime]) -> Tuple[int, str]:
         return 0, "0m 0s"
     waiting = int((datetime.now(timezone.utc) - joined_at).total_seconds())
     return waiting, f"{waiting // 60}m {waiting % 60}s"
+
+def get_queue_position(player_id: int) -> int:
+    """Get the position of a player in the matchmaking queue."""
+    for index, (pid, _ws, _joined_at) in enumerate(matchmaking_queue):
+        if pid == player_id:
+            return index + 1  # Position is 1-based
+    return -1  # Return -1 if the player is not in the queue
 
 def _build_queue_users(db) -> List[Dict[str, Any]]:
     users = []
@@ -492,7 +543,9 @@ async def _handle_accept_invitation(ws: WebSocket, data: Dict[str, Any]) -> None
         return await _send_error(ws, "Missing opponent_id or player_id for accept_invitation")
 
     try:
-        game_id = await create_new_game(player_id, opponent_id)
+        # Create a new game in the database
+        game_id = await _create_game_internal(player_id, opponent_id)
+        
         payload = {
             "type": "invitation_accepted",
             "from_player_id": player_id,
@@ -500,17 +553,19 @@ async def _handle_accept_invitation(ws: WebSocket, data: Dict[str, Any]) -> None
             "message": f"Player {player_id} accepted your invitation. Game {game_id} can start."
         }
 
-        opponent_ws = websocket_manager.player_connections.get(opponent_id, [None])[0]
+        # Get opponent's WebSocket connection safely
+        opponent_ws = _get_opponent_ws(str(opponent_id))
         if opponent_ws:
             await _send(opponent_ws, WSMessageType.MATCHMAKING_STATUS, payload)
 
         await _send(ws, WSMessageType.MATCHMAKING_STATUS, payload)
 
-        await remove_player_from_queue(player_id)
-        await remove_player_from_queue(opponent_id)
+        # Remove both players from queue (these are synchronous calls)
+        remove_player_from_queue(player_id)
+        remove_player_from_queue(opponent_id)
 
     except Exception as e:
-        logger.error(f"Error creating game after invitation acceptance: {e}")
+        logger.error(f"Error creating game after invitation acceptance: {e}", exc_info=True)
         await _send_error(ws, "Failed to create game after invitation acceptance.")
 
 async def _handle_join_queue(ws: WebSocket, data: Dict[str, Any]) -> None:
