@@ -476,12 +476,12 @@ def verify_game_status(game: DBGame, current_user: User) -> str:
 def can_transition_to_next_phase(game: DBGame, current_phase: str) -> bool:
     """Vérifie si on peut passer à la phase suivante"""
     if current_phase == "draw":
-        return bool(game.player1_card and game.player2_card)
+        return bool(getattr(game, 'player1_card', None) and getattr(game, 'player2_card', None))
     elif current_phase == "strategy":
-        return bool(game.player1_strategy and game.player2_strategy)
+        return bool(getattr(game, 'player1_strategy', None) and getattr(game, 'player2_strategy', None))
     elif current_phase == "sacrifice":
-        return (game.player1_sacrifice is not None and 
-                game.player2_sacrifice is not None)
+        return (getattr(game, 'player1_sacrifice', None) is not None and 
+                getattr(game, 'player2_sacrifice', None) is not None)
     return False
 
 def get_game_state(game: DBGame, db: Session, current_user: User) -> Dict:
@@ -493,62 +493,61 @@ def get_game_state(game: DBGame, db: Session, current_user: User) -> Dict:
     # Informations de base toujours visibles
     game_state = {
         "game_id": game.id,  # S'assurer que l'ID est toujours présent
-        "current_phase": game.current_phase,
-        "current_player": game.current_player,
         "current_turn": game.current_turn,
-        "max_turns": game.max_turns,
         "is_completed": game.is_completed,
-        "winner": game.winner,
-        "mode": game.mode,
-        "room_code": game.room_code,
-        "is_my_turn": game.current_player == current_player_type,
+        "winner_id": game.winner_id,
+        "mode": getattr(game, 'mode', 'classic'),  # Default mode if not exists
+        "room_code": getattr(game, 'room_code', None),
         "my_player_type": current_player_type,  # Utile pour le client
-        "can_transition": can_transition_to_next_phase(game, game.current_phase),
         "player1": {
             "id": player1.id,
-            "username": player1.username,
-            "current_pfh": player1.current_pfh,
-            "has_card": bool(game.player1_card),
-            "has_strategy": bool(game.player1_strategy),
-            "sacrifice_decided": game.player1_sacrifice is not None
+            "username": player1.name,  # DBPlayer uses 'name', not 'username'
+            "current_pfh": player1.pfh,  # DBPlayer uses 'pfh', not 'current_pfh'
+            "has_card": bool(getattr(game, 'player1_card', None)),
+            "has_strategy": bool(getattr(game, 'player1_strategy', None)),
+            "sacrifice_decided": getattr(game, 'player1_sacrifice', None) is not None
         },
         "player2": {
             "id": player2.id if player2 else None,
-            "username": player2.username if player2 else None,
-            "current_pfh": player2.current_pfh if player2 else None,
-            "has_card": bool(game.player2_card),
-            "has_strategy": bool(game.player2_strategy),
-            "sacrifice_decided": game.player2_sacrifice is not None
+            "username": player2.name if player2 else None,  # DBPlayer uses 'name'
+            "current_pfh": player2.pfh if player2 else None,  # DBPlayer uses 'pfh'
+            "has_card": bool(getattr(game, 'player2_card', None)),
+            "has_strategy": bool(getattr(game, 'player2_strategy', None)),
+            "sacrifice_decided": getattr(game, 'player2_sacrifice', None) is not None
         } if player2 else None
     }
     
     # Informations privées pour le joueur courant
     if current_player_type == "player1":
-        if game.player1_card:
+        player1_card = getattr(game, 'player1_card', None)
+        if player1_card:
             game_state["my_card"] = {
-                "name": game.player1_card,
-                "pfh": game.player1_card_pfh
+                "name": player1_card,
+                "pfh": getattr(game, 'player1_card_pfh', 0)
             }
-        if game.player1_sacrifice_card:
+        player1_sacrifice_card = getattr(game, 'player1_sacrifice_card', None)
+        if player1_sacrifice_card:
             game_state["my_sacrifice_card"] = {
-                "name": game.player1_sacrifice_card,
-                "pfh": game.player1_sacrifice_card_pfh
+                "name": player1_sacrifice_card,
+                "pfh": getattr(game, 'player1_sacrifice_card_pfh', 0)
             }
-        game_state["my_strategy"] = game.player1_strategy
-        game_state["my_sacrifice_decision"] = game.player1_sacrifice
+        game_state["my_strategy"] = getattr(game, 'player1_strategy', None)
+        game_state["my_sacrifice_decision"] = getattr(game, 'player1_sacrifice', None)
     elif current_player_type == "player2":
-        if game.player2_card:
+        player2_card = getattr(game, 'player2_card', None)
+        if player2_card:
             game_state["my_card"] = {
-                "name": game.player2_card,
-                "pfh": game.player2_card_pfh
+                "name": player2_card,
+                "pfh": getattr(game, 'player2_card_pfh', 0)
             }
-        if game.player2_sacrifice_card:
+        player2_sacrifice_card = getattr(game, 'player2_sacrifice_card', None)
+        if player2_sacrifice_card:
             game_state["my_sacrifice_card"] = {
-                "name": game.player2_sacrifice_card,
-                "pfh": game.player2_sacrifice_card_pfh
+                "name": player2_sacrifice_card,
+                "pfh": getattr(game, 'player2_sacrifice_card_pfh', 0)
             }
-        game_state["my_strategy"] = game.player2_strategy
-        game_state["my_sacrifice_decision"] = game.player2_sacrifice
+        game_state["my_strategy"] = getattr(game, 'player2_strategy', None)
+        game_state["my_sacrifice_decision"] = getattr(game, 'player2_sacrifice', None)
     
     return game_state
 
@@ -643,7 +642,8 @@ async def get_game_status(
         player_type = verify_game_status(game, current_user)
         
         game_state = get_game_state(game, db, current_user)
-        
+
+        print(game_state, game)
         return FaduResponse(
             success=True,
             data=game_state,
@@ -687,19 +687,11 @@ async def draw_card(
         game = db.query(DBGame).filter(DBGame.id == game_id).first()
         player_type = verify_game_status(game, current_user)
         
-        # Vérification que c'est bien le tour de l'utilisateur
-        if game.current_player != player_type:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ce n'est pas votre tour de jouer"
-            )
+        # Skip turn validation since current_player doesn't exist
+        # TODO: Implement proper turn-based logic
         
-        # Vérification de la phase
-        if game.current_phase != "draw":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Vous ne pouvez pas tirer de carte dans cette phase"
-            )
+        # Skip phase validation since current_phase doesn't exist
+        # TODO: Implement proper phase-based logic
         
         # Vérifier si le joueur a déjà sa carte principale (si on tire une carte de sacrifice)
         if is_sacrifice:
@@ -783,19 +775,11 @@ async def choose_strategy(
         game = db.query(DBGame).filter(DBGame.id == game_id).first()
         player_type = verify_game_status(game, current_user)
         
-        # Vérification que c'est bien le tour de l'utilisateur
-        if game.current_player != player_type:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ce n'est pas votre tour de jouer"
-            )
+        # Skip turn validation since current_player doesn't exist
+        # TODO: Implement proper turn-based logic
         
-        # Vérification de la phase
-        if game.current_phase != "strategy":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Vous ne pouvez pas choisir de stratégie dans cette phase"
-            )
+        # Skip phase validation since current_phase doesn't exist
+        # TODO: Implement proper phase-based logic
         
         # Validation de la stratégie
         if strategy_data.strategy not in strategy_logic.VALID_STRATEGIES:
@@ -856,19 +840,11 @@ async def decide_sacrifice(
         game = db.query(DBGame).filter(DBGame.id == game_id).first()
         player_type = verify_game_status(game, current_user)
         
-        # Vérification que c'est bien le tour de l'utilisateur
-        if game.current_player != player_type:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ce n'est pas votre tour de jouer"
-            )
+        # Skip turn validation since current_player doesn't exist
+        # TODO: Implement proper turn-based logic
         
-        # Vérification de la phase
-        if game.current_phase != "sacrifice":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Vous ne pouvez pas décider de sacrifice dans cette phase"
-            )
+        # Skip phase validation since current_phase doesn't exist
+        # TODO: Implement proper phase-based logic
         
         # Vérifier que le joueur n'a pas déjà décidé
         current_decision = (game.player1_sacrifice if player_type == "player1" 
@@ -882,7 +858,7 @@ async def decide_sacrifice(
         ).first()
         
         # Vérification du PFH pour le sacrifice (mais on ne débite pas encore)
-        if decision.sacrifice and player.current_pfh < MIN_PFH_FOR_SACRIFICE:
+        if decision.sacrifice and player.pfh < MIN_PFH_FOR_SACRIFICE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"PFH insuffisant pour sacrifier (minimum {MIN_PFH_FOR_SACRIFICE} requis)"
@@ -927,40 +903,16 @@ async def next_phase(
         game = db.query(DBGame).filter(DBGame.id == game_id).first()
         player_type = verify_game_status(game, current_user)
         
-        current_phase = game.current_phase
+        # Since current_phase doesn't exist, skip phase transition logic for now
+        # TODO: Implement proper game phase management
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Phase transition not implemented"
+        )
         
-        # Vérifier si on peut passer à la phase suivante
-        if not can_transition_to_next_phase(game, current_phase):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Impossible de passer à la phase suivante, tous les joueurs n'ont pas terminé"
-            )
-        
-        # Logique de transition selon la phase actuelle
-        if current_phase == "draw":
-            game.current_phase = "strategy"
-            game.current_player = "player1"
-            
-        elif current_phase == "strategy":
-            game.current_phase = "sacrifice"
-            game.current_player = "player1"
-            
-        elif current_phase == "sacrifice":
-            # Calculer les résultats du tour
-            await process_battle_phase(game, db)
-            game.current_phase = "results"
-            
-        elif current_phase == "results":
-            # Préparer le tour suivant ou terminer la partie
-            if game.current_turn < game.max_turns and not game.is_completed:
-                # Tour suivant
-                game.current_turn += 1
-                game.current_phase = "draw"
-                game.current_player = "player1"
-                reset_turn_data(game)
-            else:
-                # Terminer la partie
-                await finalize_game(game, db)
+        # TODO: Implement proper phase transition logic
+        # Current phase system is not implemented in the DBGame model
+        # Skipping phase transitions for now
         
         db.commit()
         
@@ -993,25 +945,25 @@ async def process_battle_phase(game: DBGame, db: Session):
         sacrifice_cost_p2 = MIN_PFH_FOR_SACRIFICE if game.player2_sacrifice else 0
         
         # Vérifications finales des PFH
-        if game.player1_sacrifice and player1.current_pfh < sacrifice_cost_p1:
+        if game.player1_sacrifice and player1.pfh < sacrifice_cost_p1:
             raise HTTPException(400, "Joueur 1: PFH insuffisant pour le sacrifice")
-        if game.player2_sacrifice and player2.current_pfh < sacrifice_cost_p2:
+        if game.player2_sacrifice and player2.pfh < sacrifice_cost_p2:
             raise HTTPException(400, "Joueur 2: PFH insuffisant pour le sacrifice")
         
         # Débiter les coûts de sacrifice
-        player1.current_pfh -= sacrifice_cost_p1
-        player2.current_pfh -= sacrifice_cost_p2
+        player1.pfh -= sacrifice_cost_p1
+        player2.pfh -= sacrifice_cost_p2
         
         # Calcul des résultats avec la logique de stratégie
         result = strategy_logic.calculate_turn_results(game)
         
         # Application des gains
-        player1.current_pfh += result.player1_gains
-        player2.current_pfh += result.player2_gains
+        player1.pfh += result.player1_gains
+        player2.pfh += result.player2_gains
         
         # S'assurer que les PFH ne descendent pas en dessous de 0
-        player1.current_pfh = max(0, player1.current_pfh)
-        player2.current_pfh = max(0, player2.current_pfh)
+        player1.pfh = max(0, player1.pfh)
+        player2.pfh = max(0, player2.pfh)
         
         # Enregistrement du résultat du tour
         turn_result = TurnResult(
@@ -1043,16 +995,19 @@ async def finalize_game(game: DBGame, db: Session):
         player2 = db.query(DBPlayer).filter(DBPlayer.id == game.player2_id).first()
         
         # Détermination du gagnant
-        if player1.current_pfh > player2.current_pfh:
-            game.winner = "player1"
-        elif player2.current_pfh > player1.current_pfh:
-            game.winner = "player2"
+        if player1.pfh > player2.pfh:
+            game.winner_id = player1.id
+            winner_name = "player1"
+        elif player2.pfh > player1.pfh:
+            game.winner_id = player2.id
+            winner_name = "player2"
         else:
-            game.winner = "draw"
+            game.winner_id = None  # Draw - no winner
+            winner_name = "draw"
         
         game.is_completed = True
         
-        logger.info(f"Partie {game.id} terminée - Gagnant: {game.winner}")
+        logger.info(f"Partie {game.id} terminée - Gagnant: {winner_name}")
         
     except Exception as e:
         logger.exception("Erreur lors de la finalisation")
